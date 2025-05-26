@@ -30,17 +30,16 @@ STDAPI DllRegisterServer();
 
 STDAPI DllUnregisterServer();
 
-// Sequence compression exports to satisfy testEncoder
-typedef BOOL (WINAPI*SeqStartFunc)(PCOMPVARS, LPBITMAPINFO);
+// Sequence-compression exports to satisfy testEncoder
+// Note: use LPBITMAPINFO here (not LPBITMAPINFOHEADER)
+typedef BOOL    (WINAPI *SeqStartFunc)(PCOMPVARS, LPBITMAPINFO);
+typedef LPVOID  (WINAPI *SeqFrameFunc)(PCOMPVARS, UINT, LPVOID, BOOL*, LONG*);
+typedef void    (WINAPI *SeqEndFunc)(PCOMPVARS);
 
-typedef LPVOID (WINAPI*SeqFrameFunc)(PCOMPVARS, UINT, LPVOID, BOOL *, LONG *);
-
-typedef void (WINAPI*SeqEndFunc)(PCOMPVARS);
-
-static HMODULE g_hVfw32 = nullptr;
+static HMODULE      g_hVfw32    = nullptr;
 static SeqStartFunc g_pSeqStart = nullptr;
 static SeqFrameFunc g_pSeqFrame = nullptr;
-static SeqEndFunc g_pSeqEnd = nullptr;
+static SeqEndFunc   g_pSeqEnd   = nullptr;
 
 static void InitSeqFuncs() {
     if (!g_hVfw32) {
@@ -48,38 +47,22 @@ static void InitSeqFuncs() {
         if (g_hVfw32) {
             g_pSeqStart = (SeqStartFunc) GetProcAddress(g_hVfw32, "ICSeqCompressFrameStart");
             g_pSeqFrame = (SeqFrameFunc) GetProcAddress(g_hVfw32, "ICSeqCompressFrame");
-            g_pSeqEnd = (SeqEndFunc) GetProcAddress(g_hVfw32, "ICSeqCompressFrameEnd");
+            g_pSeqEnd   = (SeqEndFunc)   GetProcAddress(g_hVfw32, "ICSeqCompressFrameEnd");
         }
     }
-}
-
-BOOL WINAPI ICSeqCompressFrameStart(PCOMPVARS pc, LPBITMAPINFO header) {
-    InitSeqFuncs();
-    return g_pSeqStart ? g_pSeqStart(pc, header) : FALSE;
-}
-
-LPVOID WINAPI ICSeqCompressFrame(PCOMPVARS pc, UINT flags, LPVOID in, BOOL *isKey, LONG *outSize) {
-    InitSeqFuncs();
-    return g_pSeqFrame ? g_pSeqFrame(pc, flags, in, isKey, outSize) : nullptr;
-}
-
-void WINAPI ICSeqCompressFrameEnd(PCOMPVARS pc) {
-    InitSeqFuncs();
-    if (g_pSeqEnd) g_pSeqEnd(pc);
 }
 
 #ifdef __cplusplus
 }
 #endif
 
-// Implementation of the codec as before
-
+// Our passthrough codec state
 struct PassThroughCodec {
     BITMAPINFOHEADER inputHeader;
     BITMAPINFOHEADER outputHeader;
 };
 
-static const DWORD_PTR INVALID_DRIVER_ID = (DWORD_PTR) -1;
+static const DWORD_PTR INVALID_DRIVER_ID = (DWORD_PTR)-1;
 using DefDriverProcPtr = LRESULT (WINAPI*)(DWORD_PTR, HDRVR, UINT, LPARAM, LPARAM);
 static DefDriverProcPtr g_pDefDriverProc = nullptr;
 
@@ -153,10 +136,7 @@ STDAPI CALLBACK DriverProc(
                             _tcscpy_s(pci->szDescription, _countof(pci->szDescription), _T("Pass-through VFW codec"));
                             res = ICERR_OK;
                         }
-                    }
-                    break;
-
-                    // Compress and decompress cases...
+                    } break;
 
                     default:
                         res = LocalDefDriverProc(
@@ -172,3 +152,66 @@ STDAPI CALLBACK DriverProc(
 
 STDAPI DllRegisterServer() { return S_OK; }
 STDAPI DllUnregisterServer() { return S_OK; }
+
+// --- Sequence compression API implementation ---
+
+BOOL VFWAPI ICSeqCompressFrameStart(PCOMPVARS pc,
+                                    LPBITMAPINFO lpbiIn)
+{
+    InitSeqFuncs();
+    // Open codec instance
+    HIC hic = reinterpret_cast<HIC>(
+        DriverProc(0, nullptr, DRV_OPEN,
+                   0,
+                   reinterpret_cast<LPARAM>(lpbiIn))
+    );
+    if (!hic) return FALSE;
+
+    // Store handle and input info
+    pc->lpState = reinterpret_cast<LPVOID>(hic);
+    pc->lpbiIn  = lpbiIn;
+
+    // Begin compression: pass pointers to the header within BITMAPINFO
+    LRESULT r = DriverProc(
+        reinterpret_cast<DWORD_PTR>(hic), nullptr,
+        ICM_COMPRESS_BEGIN,
+        reinterpret_cast<LPARAM>(&lpbiIn->bmiHeader),
+        reinterpret_cast<LPARAM>(&lpbiIn->bmiHeader)
+    );
+    return (r == ICERR_OK);
+}
+
+LPVOID VFWAPI ICSeqCompressFrame(PCOMPVARS pc,
+                                 UINT uiFlags,
+                                 LPVOID lpBits,
+                                 BOOL *pfKey,
+                                 LONG *plSize)
+{
+    HIC hic = reinterpret_cast<HIC>(pc->lpState);
+    ICCOMPRESS ic = {};
+    ic.dwFlags     = uiFlags;
+    ic.lpbiInput   = &pc->lpbiIn->bmiHeader;
+    ic.lpInput     = lpBits;
+    ic.lpdwFlags   = reinterpret_cast<LPDWORD>(pfKey);
+    ic.dwFrameSize = pc->lpbiIn->bmiHeader.biSizeImage;
+
+    LRESULT sz = DriverProc(
+        reinterpret_cast<DWORD_PTR>(hic), nullptr,
+        ICM_COMPRESS,
+        reinterpret_cast<LPARAM>(&ic), 0
+    );
+    if (sz > 0) {
+        if (plSize) *plSize = static_cast<LONG>(sz);
+        return lpBits;
+    }
+    return nullptr;
+}
+
+void VFWAPI ICSeqCompressFrameEnd(PCOMPVARS pc)
+{
+    HIC hic = reinterpret_cast<HIC>(pc->lpState);
+    DriverProc(
+        reinterpret_cast<DWORD_PTR>(hic), nullptr,
+        DRV_CLOSE, 0, 0
+    );
+}
