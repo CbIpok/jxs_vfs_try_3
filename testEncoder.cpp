@@ -1,4 +1,5 @@
 // Usage: testEncoder <dll-path> <raw-input> <encoded-output>
+#define NOMINMAX
 #include <windows.h>
 #include <vfw.h>
 #include <fstream>
@@ -20,19 +21,41 @@ static std::wstring LastErrorMessage(DWORD errCode) {
 int wmain(int argc, wchar_t* argv[])
 {
     std::wcout << L"=== testEncoder (debug build) ===\n";
-    if (argc != 4) {
-        std::wcerr << L"[ERROR] Usage: testEncoder <dll> <raw_in> <encoded_out>\n";
+    if (argc != 4 && argc != 7) {
+        std::wcerr << L"[ERROR] Usage: testEncoder <dll> <raw_in> <encoded_out> "
+                      L"[<width> <height> <bitDepth>]\n";
         return 1;
     }
 
+    // Параметры командной строки
     std::wstring dllPath = argv[1];
     std::wstring inPath  = argv[2];
     std::wstring outPath = argv[3];
-    std::wcout << L"[INFO] DLL path:      " << dllPath << L"\n";
-    std::wcout << L"[INFO] Input file:    " << inPath  << L"\n";
-    std::wcout << L"[INFO] Output file:   " << outPath << L"\n";
 
-    // ───── 1. читаем исходный файл ─────
+    // По умолчанию — единичный кадр 1×1×24bpp (для совместимости)
+    int width    = 1;
+    int height   = 1;
+    int bitDepth = 24;  // бит на канал × число каналов (3)
+
+    // Если переданы дополнительные параметры — парсим их
+    if (argc == 7) {
+        width    = std::stoi(argv[4]);
+        height   = std::stoi(argv[5]);
+        bitDepth = std::stoi(argv[6]);
+    }
+
+    const int channels = 3;
+    int bytesPerSample = (bitDepth + 7) / 8;
+    int bytesPerPixel  = bytesPerSample * channels;
+    int bitsPerPixel   = channels * bitDepth;
+
+    std::wcout << L"[INFO] DLL path:      " << dllPath   << L"\n"
+               << L"[INFO] Input file:    " << inPath    << L"\n"
+               << L"[INFO] Output file:   " << outPath   << L"\n"
+               << L"[INFO] Frame size:     " << width << L"x" << height << L"\n"
+               << L"[INFO] Bit depth:      " << bitDepth << L"\n";
+
+    // 1) Читаем весь файл в память
     std::ifstream fin(inPath, std::ios::binary | std::ios::ate);
     if (!fin) {
         std::wcerr << L"[ERROR] Cannot open input file: " << inPath << L"\n";
@@ -49,85 +72,71 @@ int wmain(int argc, wchar_t* argv[])
     }
     fin.close();
 
-    // ───── 2. подгружаем DLL ─────
+    // 2) Вычисляем размер одного кадра и проверяем его
+    uint64_t frameSize = uint64_t(width) * height * bytesPerPixel;
+    if (frameSize == 0) {
+        std::wcerr << L"[ERROR] Invalid frame dimensions or bit depth\n";
+        return 2;
+    }
+    if (fileSize % frameSize != 0) {
+        std::wcerr << L"[ERROR] File size (" << fileSize
+                   << L") is not a multiple of frame size (" << frameSize << L")\n";
+        return 2;
+    }
+    size_t frameCount = static_cast<size_t>(fileSize / frameSize);
+    std::wcout << L"[INFO] Frame size in bytes: " << frameSize << L"\n"
+               << L"[INFO] Frame count:         " << frameCount << L"\n";
+
+    // 3) Загружаем DLL и получаем указатели на функции
     HMODULE mod = LoadLibraryW(dllPath.c_str());
     if (!mod) {
         DWORD err = GetLastError();
-        std::wcerr << L"[ERROR] LoadLibraryW failed (0x"
-                   << std::hex << err << std::dec << L"): "
-                   << LastErrorMessage(err) << L"\n";
+        std::wcerr << L"[ERROR] LoadLibraryW failed: " << err << L"\n";
         return 3;
     }
-    std::wcout << L"[INFO] Loaded module handle: " << mod << L"\n";
-
-    auto pStart = reinterpret_cast<BOOL (WINAPI*)(PCOMPVARS,LPBITMAPINFO)>(
+    auto pStart = reinterpret_cast<BOOL (WINAPI*)(PCOMPVARS, LPBITMAPINFO)>(
         GetProcAddress(mod, "ICSeqCompressFrameStart"));
     auto pFrame = reinterpret_cast<LPVOID (WINAPI*)(PCOMPVARS,UINT,LPVOID,BOOL*,LONG*)>(
         GetProcAddress(mod, "ICSeqCompressFrame"));
     auto pEnd   = reinterpret_cast<void (WINAPI*)(PCOMPVARS)>(
         GetProcAddress(mod, "ICSeqCompressFrameEnd"));
-
-    std::cout << "[INFO] Export addresses:\n"
-              << "       ICSeqCompressFrameStart = " << pStart << "\n"
-              << "       ICSeqCompressFrame      = " << pFrame << "\n"
-              << "       ICSeqCompressFrameEnd   = " << pEnd << "\n";
-
     if (!pStart || !pFrame || !pEnd) {
         std::cerr << "[ERROR] Missing one or more exports in the DLL\n";
         FreeLibrary(mod);
         return 4;
     }
 
-    // ───── 3. подготавливаем BITMAPINFO ─────
+    // 4) Готовим BITMAPINFOHEADER
     BITMAPINFOHEADER hdr{};
     hdr.biSize        = sizeof(hdr);
-    hdr.biWidth       = 1;
-    hdr.biHeight      = 1;
+    hdr.biWidth       = width;
+    hdr.biHeight      = height;
     hdr.biPlanes      = 1;
-    hdr.biBitCount    = 24;
+    hdr.biBitCount    = static_cast<WORD>(bitsPerPixel);
     hdr.biCompression = BI_RGB;
-    hdr.biSizeImage   = static_cast<DWORD>(inBuf.size());
-
-    std::wcout << L"[INFO] BITMAPINFOHEADER:\n"
-               << L"       biSize        = " << hdr.biSize        << L"\n"
-               << L"       biWidth       = " << hdr.biWidth       << L"\n"
-               << L"       biHeight      = " << hdr.biHeight      << L"\n"
-               << L"       biPlanes      = " << hdr.biPlanes      << L"\n"
-               << L"       biBitCount    = " << hdr.biBitCount    << L"\n"
-               << L"       biCompression = " << hdr.biCompression << L"\n"
-               << L"       biSizeImage   = " << hdr.biSizeImage   << L"\n";
+    // биРазмер кадра гарантированно < 4GB, иначе выходим
+    if (frameSize > static_cast<uint64_t>(std::numeric_limits<DWORD>::max())) {
+        std::wcerr << L"[ERROR] Frame size exceeds 4GB limit: " << frameSize << L"\n";
+        FreeLibrary(mod);
+        return 2;
+    }
+    hdr.biSizeImage = static_cast<DWORD>(frameSize);
 
     COMPVARS cv{};
-    cv.cbSize   = sizeof(cv);
-    cv.lpbiIn   = reinterpret_cast<LPBITMAPINFO>(&hdr);
-    cv.lpbiOut  = nullptr; // если ваш код требует выхода, инициализируйте
-    cv.lQ        = 0;      // качество, если нужно
+    cv.cbSize  = sizeof(cv);
+    cv.lpbiIn  = reinterpret_cast<LPBITMAPINFO>(&hdr);
+    cv.lpbiOut = nullptr;  // passthrough
 
+    // 5) Запускаем компрессию последовательности
     std::wcout << L"[INFO] Calling ICSeqCompressFrameStart...\n";
     if (!pStart(&cv, reinterpret_cast<LPBITMAPINFO>(&hdr))) {
         std::cerr << "[ERROR] ICSeqCompressFrameStart failed\n";
         FreeLibrary(mod);
         return 5;
     }
-    std::cout << "[INFO] ICSeqCompressFrameStart succeeded\n";
+    std::wcout << L"[INFO] ICSeqCompressFrameStart succeeded\n";
 
-    // ───── 4. компрессия кадра ─────
-    BOOL  isKey = FALSE;
-    LONG  outSize = 0;
-    std::wcout << L"[INFO] Calling ICSeqCompressFrame...\n";
-    BYTE* outPtr = static_cast<BYTE*>(pFrame(&cv, 0, inBuf.data(), &isKey, &outSize));
-    if (!outPtr || outSize <= 0) {
-        std::cerr << "[ERROR] ICSeqCompressFrame returned no data (outPtr="
-                  << outPtr << ", outSize=" << outSize << ")\n";
-        pEnd(&cv);
-        FreeLibrary(mod);
-        return 6;
-    }
-    std::wcout << L"[INFO] ICSeqCompressFrame succeeded\n"
-               << L"       isKey    = " << (isKey ? L"TRUE" : L"FALSE") << L"\n"
-               << L"       outSize  = " << outSize << L" bytes\n";
-
-    // ───── 5. сохраняем «закодированное» ─────
+    // 6) Открываем выходной файл и кодируем по кадру
     std::ofstream fout(outPath, std::ios::binary);
     if (!fout) {
         std::wcerr << L"[ERROR] Cannot open output file: " << outPath << L"\n";
@@ -135,17 +144,30 @@ int wmain(int argc, wchar_t* argv[])
         FreeLibrary(mod);
         return 7;
     }
-    fout.write(reinterpret_cast<const char*>(outPtr), outSize);
-    fout.close();
-    std::wcout << L"[INFO] Written encoded data to file\n";
 
-    // ───── 6. закрываем и освобождаем ресурсы ─────
+    for (size_t i = 0; i < frameCount; ++i) {
+        BOOL  isKey   = FALSE;
+        LONG  outSize = 0;
+        BYTE* outPtr  = static_cast<BYTE*>(
+            pFrame(&cv, 0, inBuf.data() + i * frameSize, &isKey, &outSize)
+        );
+        if (!outPtr || outSize <= 0) {
+            std::wcerr << L"[ERROR] ICSeqCompressFrame failed on frame " << i
+                       << L" (outSize=" << outSize << L")\n";
+            pEnd(&cv);
+            FreeLibrary(mod);
+            return 6;
+        }
+        fout.write(reinterpret_cast<const char*>(outPtr), outSize);
+    }
+    std::wcout << L"[INFO] Written encoded data for " << frameCount << L" frames\n";
+
+    // 7) Завершаем и чистим
     pEnd(&cv);
     FreeLibrary(mod);
-    std::wcout << L"[INFO] Module unloaded and COMPVARS cleaned up\n";
 
-    std::wcout << L"[RESULT] Encoded " << inBuf.size() << L" bytes → "
-               << outSize << L" bytes\n";
-
+    std::wcout << L"[INFO] Module unloaded and COMPVARS cleaned up\n"
+               << L"[RESULT] Encoded " << fileSize << L" bytes → "
+               << fileSize << L" bytes\n";
     return 0;
 }
