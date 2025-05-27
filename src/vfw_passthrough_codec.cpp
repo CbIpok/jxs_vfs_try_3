@@ -1,12 +1,11 @@
 #pragma once
-
 #include <windows.h>
 #include <vfw.h>
 #include <tchar.h>
 #include <new>
-#include <cstring>
+#include <cstring>  // для memcpy
 
-// FourCC for our "null" codec
+// FourCC для "нулевого" кодека
 #ifndef FOURCC_NULL_CODEC
 #define FOURCC_NULL_CODEC mmioFOURCC('n','u','l','l')
 #endif
@@ -15,41 +14,40 @@
 extern "C" {
 #endif
 
-// Standard exports
+// VCM entry points
+HIC     VFWAPI ICOpen(DWORD fccType, DWORD fccHandler, UINT wMode);
+LRESULT VFWAPI ICClose(HIC hic);
+
+// Стандартные экспорты VFW
 LRESULT CALLBACK DriverProc(
     DWORD_PTR dwDriverID,
-    HDRVR hDriver,
-    UINT uMsg,
-    LPARAM lParam1,
-    LPARAM lParam2
+    HDRVR     hDriver,
+    UINT      uMsg,
+    LPARAM    lParam1,
+    LPARAM    lParam2
 );
+BOOL    WINAPI      DllMain(HINSTANCE, DWORD, LPVOID);
+STDAPI   DllRegisterServer();
+STDAPI   DllUnregisterServer();
 
-BOOL WINAPI DllMain(HINSTANCE, DWORD, LPVOID);
+// Последовательная компрессия
+typedef BOOL   (WINAPI* SeqStartFunc)(PCOMPVARS, LPBITMAPINFO);
+typedef LPVOID (WINAPI* SeqFrameFunc)(PCOMPVARS, UINT, LPVOID, BOOL*, LONG*);
+typedef void   (WINAPI* SeqEndFunc)(PCOMPVARS);
 
-STDAPI DllRegisterServer();
-
-STDAPI DllUnregisterServer();
-
-// Sequence-compression exports to satisfy testEncoder
-// Note: use LPBITMAPINFO here (not LPBITMAPINFOHEADER)
-typedef BOOL (WINAPI *SeqStartFunc)(PCOMPVARS, LPBITMAPINFO);
-
-typedef LPVOID (WINAPI *SeqFrameFunc)(PCOMPVARS, UINT, LPVOID, BOOL *, LONG *);
-
-typedef void (WINAPI *SeqEndFunc)(PCOMPVARS);
-
-static HMODULE g_hVfw32 = nullptr;
+static HMODULE      g_hVfw32    = nullptr;
 static SeqStartFunc g_pSeqStart = nullptr;
 static SeqFrameFunc g_pSeqFrame = nullptr;
-static SeqEndFunc g_pSeqEnd = nullptr;
+static SeqEndFunc   g_pSeqEnd   = nullptr;
 
+// Инициализация функций из vfw32.dll
 static void InitSeqFuncs() {
     if (!g_hVfw32) {
         g_hVfw32 = LoadLibrary(TEXT("vfw32.dll"));
         if (g_hVfw32) {
-            g_pSeqStart = (SeqStartFunc) GetProcAddress(g_hVfw32, "ICSeqCompressFrameStart");
-            g_pSeqFrame = (SeqFrameFunc) GetProcAddress(g_hVfw32, "ICSeqCompressFrame");
-            g_pSeqEnd = (SeqEndFunc) GetProcAddress(g_hVfw32, "ICSeqCompressFrameEnd");
+            g_pSeqStart = (SeqStartFunc)GetProcAddress(g_hVfw32, "ICSeqCompressFrameStart");
+            g_pSeqFrame = (SeqFrameFunc)GetProcAddress(g_hVfw32, "ICSeqCompressFrame");
+            g_pSeqEnd   = (SeqEndFunc)  GetProcAddress(g_hVfw32, "ICSeqCompressFrameEnd");
         }
     }
 }
@@ -58,16 +56,16 @@ static void InitSeqFuncs() {
 }
 #endif
 
-// Our passthrough codec state
 struct PassThroughCodec {
     BITMAPINFOHEADER inputHeader;
     BITMAPINFOHEADER outputHeader;
 };
 
-static const DWORD_PTR INVALID_DRIVER_ID = (DWORD_PTR) -1;
+static const DWORD_PTR INVALID_DRIVER_ID = (DWORD_PTR)-1;
 using DefDriverProcPtr = LRESULT (WINAPI*)(DWORD_PTR, HDRVR, UINT, LPARAM, LPARAM);
 static DefDriverProcPtr g_pDefDriverProc = nullptr;
 
+// Обёртка для DefDriverProc из vfw32.dll
 static LRESULT CALLBACK LocalDefDriverProc(
     DWORD_PTR dwID, HDRVR hDrv, UINT msg, LPARAM p1, LPARAM p2
 ) {
@@ -77,9 +75,10 @@ static LRESULT CALLBACK LocalDefDriverProc(
         g_pDefDriverProc = reinterpret_cast<DefDriverProcPtr>(
             GetProcAddress(h, "DefDriverProc")
         );
-        if (!g_pDefDriverProc) return 0;
     }
-    return g_pDefDriverProc(dwID, hDrv, msg, p1, p2);
+    return g_pDefDriverProc
+        ? g_pDefDriverProc(dwID, hDrv, msg, p1, p2)
+        : 0;
 }
 
 BOOL WINAPI DllMain(HINSTANCE, DWORD, LPVOID) {
@@ -94,13 +93,11 @@ LRESULT CALLBACK DriverProc(
     LPARAM    lParam2
 ) {
     LRESULT res = ICERR_UNSUPPORTED;
-    auto *pCodec = reinterpret_cast<PassThroughCodec *>(dwDriverID);
+    auto *pCodec = reinterpret_cast<PassThroughCodec*>(dwDriverID);
 
     switch (uMsg) {
-        case DRV_LOAD:
-        case DRV_FREE:
-        case DRV_ENABLE:
-        case DRV_DISABLE:
+        case DRV_LOAD: case DRV_FREE:
+        case DRV_ENABLE: case DRV_DISABLE:
         case DRV_INSTALL:
             res = DRV_OK;
             break;
@@ -116,9 +113,7 @@ LRESULT CALLBACK DriverProc(
             break;
 
         case DRV_CLOSE:
-            if (pCodec) {
-                delete pCodec;
-            }
+            if (pCodec) delete pCodec;
             res = DRV_OK;
             break;
 
@@ -128,71 +123,115 @@ LRESULT CALLBACK DriverProc(
             } else {
                 switch (uMsg) {
                     case ICM_GETINFO: {
-                        auto *pci = reinterpret_cast<ICINFO *>(lParam1);
-                        if (!pci ||
-                            lParam2 < static_cast<LPARAM>(sizeof(ICINFO)))
-                        {
+                        ICINFO *pci = reinterpret_cast<ICINFO*>(lParam1);
+                        if (!pci || lParam2 < (LPARAM)sizeof(ICINFO)) {
                             res = ICERR_BADPARAM;
                         } else {
-                            pci->dwSize    = sizeof(ICINFO);
-                            pci->fccType   = ICTYPE_VIDEO;
-                            pci->fccHandler = FOURCC_NULL_CODEC;
-                            pci->dwVersion = 0x00010000;
-                            pci->dwFlags   = 0;
-                            _tcscpy_s(pci->szName,
-                                      _countof(pci->szName),
-                                      _T("Null Codec"));
-                            _tcscpy_s(pci->szDescription,
-                                      _countof(pci->szDescription),
-                                      _T("Pass-through VFW codec"));
+                            pci->dwSize      = sizeof(ICINFO);
+                            pci->fccType     = ICTYPE_VIDEO;
+                            pci->fccHandler  = FOURCC_NULL_CODEC;
+                            pci->dwVersion   = 0x00010000;
+                            pci->dwFlags     = 0;
+                            _tcscpy_s(pci->szName,        _T("Null Codec"));
+                            _tcscpy_s(pci->szDescription, _T("Pass-through VFW codec"));
+                            res = ICERR_OK;
+                        }
+                    } break;
+
+                    case ICM_DECOMPRESS_GET_FORMAT: {
+                        auto *in  = (LPBITMAPINFOHEADER)lParam1;
+                        auto *out = (LPBITMAPINFOHEADER)lParam2;
+                        if (in && out) {
+                            *out = *in;
+                            res = ICERR_OK;
+                        } else {
+                            res = ICERR_BADPARAM;
+                        }
+                    } break;
+
+                    case ICM_DECOMPRESS_QUERY:
+                    case ICM_DECOMPRESS_BEGIN:
+                    case ICM_DECOMPRESS_END:
+                        res = ICERR_OK;
+                        break;
+
+                    // <-- Добавленный блок для обработки декомпрессии
+                    case ICM_DECOMPRESS: {
+                        ICDECOMPRESS *picd = reinterpret_cast<ICDECOMPRESS*>(lParam1);
+                        if (!picd || !picd->lpbiInput || !picd->lpInput || !picd->lpOutput) {
+                            res = ICERR_BADPARAM;
+                        } else {
+                            // Pass-through: просто копируем вход в выход
+                            DWORD size = picd->lpbiInput->biSizeImage;
+                            memcpy(picd->lpOutput, picd->lpInput, size);
                             res = ICERR_OK;
                         }
                     } break;
 
                     default:
-                        res = LocalDefDriverProc(
-                            dwDriverID, hDriver,
-                            uMsg, lParam1, lParam2
-                        );
+                        res = LocalDefDriverProc(dwDriverID, hDriver,
+                                                 uMsg, lParam1, lParam2);
                 }
             }
             break;
     }
-
     return res;
 }
 
-STDAPI DllRegisterServer() { return S_OK; }
+STDAPI DllRegisterServer()   { return S_OK; }
 STDAPI DllUnregisterServer() { return S_OK; }
 
-// Начало последовательной компрессии: просто сохраняем указатель на входной заголовок
+// VCM entry points с явным кастом lpfnHandler
+HIC VFWAPI ICOpen(DWORD fccType, DWORD fccHandler, UINT wMode) {
+    return ICOpenFunction(
+        fccType,
+        fccHandler,
+        wMode,
+        reinterpret_cast<FARPROC>(DriverProc)
+    );
+}
+
+LRESULT VFWAPI ICClose(HIC hic) {
+    return DriverProc(reinterpret_cast<DWORD_PTR>(hic), nullptr,
+                      DRV_CLOSE, 0, 0);
+}
+
+//------------------------------------------------------------------------------
+// Последовательная компрессия (passthrough)
+//------------------------------------------------------------------------------
 BOOL VFWAPI ICSeqCompressFrameStart(PCOMPVARS pc, LPBITMAPINFO lpbiIn) {
-    // Состояние кодека не используется
     pc->lpState = nullptr;
-    // Сохраняем информацию о входном изображении
-    pc->lpbiIn   = lpbiIn;
-    // Выходной формат совпадает с входным (не требуется отдельный lpbiOut)
-    pc->lpbiOut  = lpbiIn;
+    pc->lpbiIn  = lpbiIn;
+    pc->lpbiOut = lpbiIn;
     return TRUE;
 }
 
-// Компрессия одного кадра: возвращаем тот же буфер, меняем размер и флаг ключевого кадра
-LPVOID VFWAPI ICSeqCompressFrame(PCOMPVARS pc,
-                                 UINT    uiFlags,
-                                 LPVOID  lpBits,
-                                 BOOL   *pfKey,
-                                 LONG   *plSize) {
-    // В passthrough-кодеке выход – это просто входные данные
-    if (plSize) {
-        *plSize = static_cast<LONG>(pc->lpbiIn->bmiHeader.biSizeImage);
-    }
-    if (pfKey) {
-        *pfKey = TRUE;
-    }
+LPVOID VFWAPI ICSeqCompressFrame(PCOMPVARS pc, UINT uiFlags,
+                                 LPVOID lpBits, BOOL *pfKey, LONG *plSize) {
+    if (plSize) *plSize = pc->lpbiIn->bmiHeader.biSizeImage;
+    if (pfKey)  *pfKey  = TRUE;
     return lpBits;
 }
 
-// Завершение последовательной компрессии: ничего не нужно освобождать
-void VFWAPI ICSeqCompressFrameEnd(PCOMPVARS pc) {
-    // Просто заглушка
+void VFWAPI ICSeqCompressFrameEnd(PCOMPVARS) { }
+
+//------------------------------------------------------------------------------
+// Последовательная декомпрессия (passthrough)
+//------------------------------------------------------------------------------
+BOOL VFWAPI ICSeqDecompressFrameStart(PCOMPVARS pc,
+                                      LPBITMAPINFO lpbiIn,
+                                      LPBITMAPINFO lpbiOut) {
+    pc->lpState  = nullptr;
+    pc->lpbiIn   = lpbiIn;
+    pc->lpbiOut  = lpbiOut;
+    return TRUE;
 }
+
+LPVOID VFWAPI ICSeqDecompressFrame(PCOMPVARS pc, LPVOID lpData,
+                                   LONG cbData, BOOL *pfKey, LONG *plSize) {
+    if (plSize) *plSize = cbData;
+    if (pfKey)  *pfKey  = TRUE;
+    return lpData;
+}
+
+void VFWAPI ICSeqDecompressFrameEnd(PCOMPVARS) { }

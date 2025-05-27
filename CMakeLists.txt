@@ -18,5 +18,8 @@ set_target_properties(vfw_ffmpeg_wrapper PROPERTIES
         OUTPUT_NAME "jxs_ffmpeg_vfw"
 )
 
-add_executable(test_vfw testEncoder.cpp)
-target_link_libraries(test_vfw vfw32 Shlwapi vfw_ffmpeg_wrapper)
+add_executable(test_vfw_enc testEncoder.cpp)
+target_link_libraries(test_vfw_enc vfw32 Shlwapi vfw_ffmpeg_wrapper)
+
+add_executable(test_vfw_dec testDecoder.cpp)
+target_link_libraries(test_vfw_dec vfw32 Shlwapi vfw_ffmpeg_wrapper)
