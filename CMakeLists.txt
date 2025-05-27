@@ -1,6 +1,23 @@
 cmake_minimum_required(VERSION 3.15)
 project(VFWFFmpegWrapper VERSION 1.0 LANGUAGES CXX)
 
+
+# ——————————————————————————————
+# 2) Включаем подробные debug-символы для MSVC
+# ——————————————————————————————
+if(MSVC)
+    # /Zi генерирует PDB, /DEBUG при линковке
+    add_compile_options(
+            $<$<CONFIG:Debug>:/Zi>
+            $<$<CONFIG:Debug>:/Od>      # отключаем оптимизации
+    )
+    add_link_options(
+            $<$<CONFIG:Debug>:/DEBUG>
+    )
+endif()
+# Для MinGW/CLang под Ninja/Make: CMakeProfile в CLion в Debug и так
+# добавит -g, -O0 автоматически.
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)   # <—— auto-export everything
