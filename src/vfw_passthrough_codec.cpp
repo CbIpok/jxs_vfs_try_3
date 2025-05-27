@@ -165,62 +165,34 @@ LRESULT CALLBACK DriverProc(
 STDAPI DllRegisterServer() { return S_OK; }
 STDAPI DllUnregisterServer() { return S_OK; }
 
-// --- Sequence compression API implementation ---
-
-BOOL VFWAPI ICSeqCompressFrameStart(PCOMPVARS pc,
-                                    LPBITMAPINFO lpbiIn) {
-    InitSeqFuncs();
-    // Open codec instance
-    HIC hic = reinterpret_cast<HIC>(
-        DriverProc(0, nullptr, DRV_OPEN,
-                   0,
-                   reinterpret_cast<LPARAM>(lpbiIn))
-    );
-    if (!hic) return FALSE;
-
-    // Store handle and input info
-    pc->lpState = reinterpret_cast<LPVOID>(hic);
-    pc->lpbiIn = lpbiIn;
-
-    // Begin compression: pass pointers to the header within BITMAPINFO
-    LRESULT r = DriverProc(
-        reinterpret_cast<DWORD_PTR>(hic), nullptr,
-        ICM_COMPRESS_BEGIN,
-        reinterpret_cast<LPARAM>(&lpbiIn->bmiHeader),
-        reinterpret_cast<LPARAM>(&lpbiIn->bmiHeader)
-    );
-    return (r == ICERR_OK);
+// Начало последовательной компрессии: просто сохраняем указатель на входной заголовок
+BOOL VFWAPI ICSeqCompressFrameStart(PCOMPVARS pc, LPBITMAPINFO lpbiIn) {
+    // Состояние кодека не используется
+    pc->lpState = nullptr;
+    // Сохраняем информацию о входном изображении
+    pc->lpbiIn   = lpbiIn;
+    // Выходной формат совпадает с входным (не требуется отдельный lpbiOut)
+    pc->lpbiOut  = lpbiIn;
+    return TRUE;
 }
 
+// Компрессия одного кадра: возвращаем тот же буфер, меняем размер и флаг ключевого кадра
 LPVOID VFWAPI ICSeqCompressFrame(PCOMPVARS pc,
-                                 UINT uiFlags,
-                                 LPVOID lpBits,
-                                 BOOL *pfKey,
-                                 LONG *plSize) {
-    HIC hic = reinterpret_cast<HIC>(pc->lpState);
-    ICCOMPRESS ic = {};
-    ic.dwFlags = uiFlags;
-    ic.lpbiInput = &pc->lpbiIn->bmiHeader;
-    ic.lpInput = lpBits;
-    ic.lpdwFlags = reinterpret_cast<LPDWORD>(pfKey);
-    ic.dwFrameSize = pc->lpbiIn->bmiHeader.biSizeImage;
-
-    LRESULT sz = DriverProc(
-        reinterpret_cast<DWORD_PTR>(hic), nullptr,
-        ICM_COMPRESS,
-        reinterpret_cast<LPARAM>(&ic), 0
-    );
-    if (sz > 0) {
-        if (plSize) *plSize = static_cast<LONG>(sz);
-        return lpBits;
+                                 UINT    uiFlags,
+                                 LPVOID  lpBits,
+                                 BOOL   *pfKey,
+                                 LONG   *plSize) {
+    // В passthrough-кодеке выход – это просто входные данные
+    if (plSize) {
+        *plSize = static_cast<LONG>(pc->lpbiIn->bmiHeader.biSizeImage);
     }
-    return nullptr;
+    if (pfKey) {
+        *pfKey = TRUE;
+    }
+    return lpBits;
 }
 
+// Завершение последовательной компрессии: ничего не нужно освобождать
 void VFWAPI ICSeqCompressFrameEnd(PCOMPVARS pc) {
-    HIC hic = reinterpret_cast<HIC>(pc->lpState);
-    DriverProc(
-        reinterpret_cast<DWORD_PTR>(hic), nullptr,
-        DRV_CLOSE, 0, 0
-    );
+    // Просто заглушка
 }
