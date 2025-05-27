@@ -13,19 +13,26 @@
 
 // Utility: fast file reading into vector
 static bool readFile(const wchar_t* path, std::vector<BYTE> &data) {
+    std::wcout << L"[DEBUG] readFile: opening " << path << L"\n";
     std::ifstream fin(path, std::ios::binary | std::ios::ate);
-    if (!fin) return false;
+    if (!fin) {
+        std::wcerr << L"[ERROR] Cannot open file: " << path << L"\n";
+        return false;
+    }
     std::streamsize size = fin.tellg();
+    std::wcout << L"[DEBUG] readFile: size = " << size << L" bytes\n";
     if (size <= 0) return false;
     data.resize(static_cast<size_t>(size));
     fin.seekg(0, std::ios::beg);
-    if (!fin.read(reinterpret_cast<char*>(data.data()), size))
+    if (!fin.read(reinterpret_cast<char*>(data.data()), size)) {
+        std::wcerr << L"[ERROR] Failed to read data from: " << path << L"\n";
         return false;
+    }
     return true;
 }
 
 int wmain(int argc, wchar_t *argv[]) {
-    std::wcout << L"=== testDecoder (debug build) ===\n";
+    std::wcout << L"=== instrumented_testDecoder (debug build) ===\n";
     if (argc != 7) {
         std::wcerr << L"[ERROR] Usage: testDecoder <dll> <encoded_in> <raw_out> <width> <height> <bitDepth>\n";
         return 1;
@@ -38,67 +45,70 @@ int wmain(int argc, wchar_t *argv[]) {
     int height = std::stoi(argv[5]);
     int bpp    = std::stoi(argv[6]);  // bits per pixel
 
-    // 1) Читаем входной файл
+    std::wcout << L"[DEBUG] DLL: " << dllPath << L", Input: " << inPath
+               << L", Output: " << outPath << L"\n";
+    std::wcout << L"[DEBUG] width=" << width << L", height=" << height << L", bpp=" << bpp << L"\n";
+
     std::vector<BYTE> inData;
     if (!readFile(inPath, inData)) {
         std::wcerr << L"[ERROR] Cannot read input file: " << inPath << L"\n";
         return 2;
     }
 
-    // 2) Загружаем кодек-DLL
     HMODULE hCodec = LoadLibraryW(dllPath);
     if (!hCodec) {
         std::wcerr << L"[ERROR] Cannot load DLL: " << dllPath << L"\n";
         return 3;
     }
+    std::wcout << L"[DEBUG] DLL loaded at " << hCodec << L"\n";
 
-    // 3) Получаем адреса ICOpen/ICClose
     using ICOPENPROC  = HIC  (WINAPI*)(DWORD, DWORD, UINT);
     using ICCLOSEPROC = LRESULT (WINAPI*)(HIC);
 
-    ICOPENPROC  pfnICOpen  = reinterpret_cast<ICOPENPROC>( GetProcAddress(hCodec, "ICOpen") );
-    ICCLOSEPROC pfnICClose = reinterpret_cast<ICCLOSEPROC>(GetProcAddress(hCodec, "ICClose"));
+    auto pfnICOpen  = reinterpret_cast<ICOPENPROC>( GetProcAddress(hCodec, "ICOpen") );
+    auto pfnICClose = reinterpret_cast<ICCLOSEPROC>(GetProcAddress(hCodec, "ICClose"));
     if (!pfnICOpen || !pfnICClose) {
         std::wcerr << L"[ERROR] Missing ICOpen/ICClose exports in DLL\n";
         FreeLibrary(hCodec);
         return 4;
     }
 
-    // 4) Открываем кодек в режиме распаковки
-    //    Используем FOURCC_NULL_CODEC из вашего хедера
     HIC hic = pfnICOpen(ICTYPE_VIDEO, FOURCC_NULL_CODEC, ICMODE_DECOMPRESS);
     if (!hic) {
         std::wcerr << L"[ERROR] ICOpen() failed\n";
         FreeLibrary(hCodec);
         return 5;
     }
+    std::wcout << L"[DEBUG] ICOpen returned HIC=" << hic << L"\n";
 
-    // 5) Готовим BITMAPINFOHEADER для input/output
     BITMAPINFOHEADER biIn  = {};
     biIn.biSize        = sizeof(biIn);
     biIn.biWidth       = width;
     biIn.biHeight      = height;
     biIn.biPlanes      = 1;
     biIn.biBitCount    = static_cast<WORD>(bpp);
-    biIn.biCompression = FOURCC_NULL_CODEC;         // ваш FourCC
+    biIn.biCompression = FOURCC_NULL_CODEC;
     biIn.biSizeImage   = static_cast<DWORD>(inData.size());
 
     BITMAPINFOHEADER biOut = biIn;
-    biOut.biCompression = BI_RGB;                   // неупакованный вывод
-    biOut.biSizeImage   = static_cast<DWORD>(width * height * (bpp/8));
+    biOut.biCompression = BI_RGB;                   // для passthrough: выход в том же формате
+    // сквозной кодек: выходной размер совпадает с входным
+    biOut.biSizeImage   = biIn.biSizeImage;
+
+    std::wcout << L"[DEBUG] biIn.biSizeImage=" << biIn.biSizeImage
+               << L", biOut.biSizeImage=" << biOut.biSizeImage << L"\n";
 
     std::vector<BYTE> outData(biOut.biSizeImage);
 
-    // 6) Собственно вызов распаковки
     LRESULT res = ICDecompress(
         hic,
-        0,                        // flags
-        &biIn,                    // информация о входном кадре
-        inData.data(),            // указатель на сжатые данные
-        &biOut,                   // инфо о выходном буфере
-        outData.data()            // куда писать сырые пиксели
+        0,
+        &biIn,
+        inData.data(),
+        &biOut,
+        outData.data()
     );
-
+    std::wcout << L"[DEBUG] ICDecompress returned " << res << L"\n";
     if (res != ICERR_OK) {
         std::wcerr << L"[ERROR] ICDecompress() failed, code=" << res << L"\n";
         pfnICClose(hic);
@@ -106,11 +116,9 @@ int wmain(int argc, wchar_t *argv[]) {
         return 6;
     }
 
-    // 7) Закрываем кодек и выгружаем DLL
     pfnICClose(hic);
     FreeLibrary(hCodec);
 
-    // 8) Пишем выходной файл
     std::ofstream fout(outPath, std::ios::binary);
     if (!fout || !fout.write(reinterpret_cast<char*>(outData.data()), outData.size())) {
         std::wcerr << L"[ERROR] Cannot write output file: " << outPath << L"\n";
