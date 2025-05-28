@@ -5,6 +5,15 @@
 #include <fstream>
 #include <cstring>
 
+// Новая структура для хранения состояния кодека
+struct CodecContext {
+    int a;
+    int b;
+    int c;
+    int d;
+};
+
+static CodecContext* driver=  nullptr;
 
 // FourCC for "null" codec
 #ifndef FOURCC_NULL_CODEC
@@ -64,14 +73,16 @@ extern "C" LRESULT CALLBACK DriverProc(
             }
             {
                 void *ctx = std::malloc(1);
+                driver = reinterpret_cast<CodecContext*>(ctx);
                 g_log << "  DRV_OPEN, allocated ctx=" << ctx << std::endl;
                 return reinterpret_cast<LRESULT>(ctx);
             }
 
         case DRV_CLOSE:
-            if (dwDriverId && dwDriverId != INVALID_DRIVER_ID) {
+            if (dwDriverId != INVALID_DRIVER_ID) {
                 g_log << "  DRV_CLOSE, freeing ctx=" << reinterpret_cast<void*>(dwDriverId) << std::endl;
-                std::free(reinterpret_cast<void *>(dwDriverId));
+                dwDriverId = INVALID_DRIVER_ID;
+                std::free(driver);
             }
             return DRV_OK;
         default:
@@ -87,6 +98,7 @@ extern "C" LRESULT CALLBACK DriverProc(
             pInfo->fccType = ICTYPE_VIDEO;
             pInfo->fccHandler = FOURCC_NULL_CODEC;
             pInfo->dwFlags = VIDCF_TEMPORAL | VIDCF_FASTTEMPORALD | VIDCF_QUALITY;
+
             _tcscpy(pInfo->szDescription, _T("Null pass-through codec"));
             g_log << "  ICM_GETINFO" << std::endl;
             result = ICERR_OK;
@@ -112,7 +124,7 @@ extern "C" LRESULT CALLBACK DriverProc(
             DWORD n = picc->lpbiInput->biSizeImage;
             g_log << "  ICM_COMPRESS inputSize=" << n
                   << ", dwFrameSize=" << picc->dwFrameSize << std::endl;
-            if (picc->dwFrameSize < n) {
+            if (picc->dwFrameSize < n && picc->dwFrameSize != 0) {
                 g_log << "    ERROR: memory too small" << std::endl;
                 result = ICERR_MEMORY;
             } else {
